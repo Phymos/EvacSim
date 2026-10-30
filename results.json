@@ -1,0 +1,16 @@
+{
+  "note": "Hand-made example input for optimize.py (illustrative numbers, not measured). IDs match layout.json order: doors[i] is 'door i', exits[i] is 'exit i'.",
+  "evacuation_time_s": 95,
+  "congestion_by_zone": {
+    "Room 1": 0.82,
+    "Room 2": 0.31,
+    "Room 3": 0.78,
+    "Room 4": 0.29,
+    "Corridor": 0.66
+  },
+  "bottlenecks": [
+    {"rank": 1, "id": "door 1", "avg_wait_s": 34, "note": "top-left corridor door"},
+    {"rank": 2, "id": "door 3", "avg_wait_s": 29, "note": "bottom-left corridor door"},
+    {"rank": 3, "id": "exit 0", "avg_wait_s": 22, "note": "left exit"}
+  ]
+}

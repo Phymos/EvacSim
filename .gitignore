@@ -21,3 +21,14 @@ auth/
 .hg/
 .sl/
 .eden/
+
+# Unity project (unity/EvacSim): ignore generated/local dirs and files.
+# Assets/, Packages/ and ProjectSettings/ are intentionally tracked.
+unity/EvacSim/Library/
+unity/EvacSim/Temp/
+unity/EvacSim/Obj/
+unity/EvacSim/Logs/
+unity/EvacSim/UserSettings/
+unity/EvacSim/Build/
+unity/EvacSim/*.csproj
+unity/EvacSim/*.sln
