@@ -1,0 +1,23 @@
+# Virtualenv
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# API keys, credentials, auth material - NEVER commit these
+.env
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+*-key.json
+auth/
+
+# Other VCS / workspace admin stores - do not scoop into git
+.hg/
+.sl/
+.eden/
