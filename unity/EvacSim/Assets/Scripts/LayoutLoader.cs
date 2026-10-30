@@ -34,11 +34,35 @@ public class LayoutLoader : MonoBehaviour
     public List<Vector3> ExitCenters { get; private set; } // walkable exit points
     public Vector2 BuildingSize { get; private set; }      // (width, depth) in meters
     public Vector3 BuildingCenter { get; private set; }
+    public Vector2 InteriorMin { get; private set; } // inside-outer-walls rect,
+    public Vector2 InteriorMax { get; private set; } // as world (x, z) corners
+    public List<Bounds> WallBounds { get; private set; } // world-space wall boxes
+    public Material AgentMaterial { get; private set; }  // shared agent color
     public bool IsBuilt { get; private set; }
 
     void Start()
     {
         BuildLayout();
+    }
+
+    // Flat unlit material in one color (walls stay readable in any light).
+    static Material Solid(Color color)
+    {
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null)
+        {
+            Debug.LogError("URP Unlit shader not found!");
+            shader = Shader.Find("Unlit/Color"); // last-resort fallback
+        }
+        return new Material(shader) { color = color };
+    }
+
+    // Flat look: this renderer neither casts nor receives shadows.
+    static void NoShadows(GameObject go)
+    {
+        Renderer r = go.GetComponent<Renderer>();
+        r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        r.receiveShadows = false;
     }
 
     // Public + runs once, so EvacManager can force it first if needed.
@@ -62,14 +86,28 @@ public class LayoutLoader : MonoBehaviour
         BuildingSize = new Vector2(imgW, imgH);
         BuildingCenter = new Vector3(imgW / 2f, 0f, -imgH / 2f);
 
+        // Flat lights: unlit materials ignore light anyway; this is belt-and-braces.
+        foreach (Light light in FindObjectsByType<Light>(FindObjectsSortMode.None))
+            if (light.type == LightType.Directional)
+                light.shadows = LightShadows.None;
+
+        Material wallMat = Solid(new Color(0.16f, 0.16f, 0.20f));   // dark walls
+        Material floorMat = Solid(new Color(0.83f, 0.83f, 0.85f));  // light floor
+        Material exitMat = Solid(new Color(0.10f, 0.80f, 0.25f));   // green exits
+        AgentMaterial = Solid(new Color(1f, 0.40f, 0.10f));         // orange agents
+
         // 2. Floor plane covering the whole image (a Unity Plane is 10x10 m).
         GameObject floor = GameObject.CreatePrimitive(PrimitiveType.Plane);
         floor.name = "Floor";
         floor.transform.parent = transform;
         floor.transform.position = BuildingCenter;
         floor.transform.localScale = new Vector3(imgW / 10f, 1f, imgH / 10f);
+        floor.GetComponent<Renderer>().material = floorMat;
+        NoShadows(floor);
 
         // 3. One thin cube per wall rect (pixel x -> world x, pixel y -> world -z).
+        WallBounds = new List<Bounds>();
+        IntRect top = null, bottom = null, left = null, right = null; // outer walls
         for (int i = 0; i < layout.walls.Length; i++)
         {
             IntRect r = layout.walls[i];
@@ -79,10 +117,28 @@ public class LayoutLoader : MonoBehaviour
             wall.transform.localScale = new Vector3(r.w / PxPerMeter, WallHeight, r.h / PxPerMeter);
             wall.transform.position = new Vector3(
                 (r.x + r.w / 2f) / PxPerMeter, WallHeight / 2f, -(r.y + r.h / 2f) / PxPerMeter);
+            wall.GetComponent<Renderer>().material = wallMat;
+            NoShadows(wall);
+            WallBounds.Add(new Bounds(wall.transform.position, wall.transform.localScale));
+            // Track the extreme runs: they frame the building footprint.
+            if (r.w >= r.h) // horizontal run
+            {
+                if (top == null || r.y < top.y) top = r;
+                if (bottom == null || r.y > bottom.y) bottom = r;
+            }
+            else // vertical run
+            {
+                if (left == null || r.x < left.x) left = r;
+                if (right == null || r.x > right.x) right = r;
+            }
         }
         // No door objects: the gaps between wall cubes ARE the doors.
 
-        // 4. One invisible trigger zone per exit rect.
+        // Interior = inside the inner edges of the four outer walls.
+        InteriorMin = new Vector2((left.x + left.w) / PxPerMeter, -bottom.y / PxPerMeter);
+        InteriorMax = new Vector2(right.x / PxPerMeter, -(top.y + top.h) / PxPerMeter);
+
+        // 4. One trigger zone per exit rect, with a green pad so you can see it.
         ExitCenters = new List<Vector3>();
         for (int i = 0; i < layout.exits.Length; i++)
         {
@@ -91,22 +147,34 @@ public class LayoutLoader : MonoBehaviour
             zone.tag = "Exit"; // add this tag under Project Settings > Tags and Layers
             zone.transform.parent = transform;
             zone.transform.position = new Vector3(
-                (r.x + r.w / 2f) / PxPerMeter, 1f, -(r.y + r.h / 2f) / PxPerMeter);
+                (r.x + r.w / 2f) / PxPerMeter, 0f, -(r.y + r.h / 2f) / PxPerMeter);
             BoxCollider trigger = zone.AddComponent<BoxCollider>();
             trigger.isTrigger = true;
+            trigger.center = new Vector3(0f, 1f, 0f);
             trigger.size = new Vector3(r.w / PxPerMeter, 2f, r.h / PxPerMeter);
+            GameObject pad = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            pad.name = "Pad";
+            pad.transform.parent = zone.transform;
+            pad.transform.localPosition = new Vector3(0f, 0.06f, 0f);
+            pad.transform.localScale = new Vector3(r.w / PxPerMeter, 0.12f, r.h / PxPerMeter);
+            pad.GetComponent<Renderer>().material = exitMat;
+            NoShadows(pad);
+            Destroy(pad.GetComponent<BoxCollider>()); // pad is only paint, not physics
             ExitCenters.Add(new Vector3(zone.transform.position.x, 0f, zone.transform.position.z));
         }
 
-        // 5. Top-down camera framing the building (reuses Main Camera if any).
+        // 5. Top-down camera (90 degrees) looking at the building center.
         Camera cam = Camera.main;
         if (cam == null)
             cam = new GameObject("TopDownCamera").AddComponent<Camera>();
-        cam.transform.position = BuildingCenter + Vector3.up * 40f;
-        cam.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+        const float tilt = 90f;
+        cam.transform.rotation = Quaternion.Euler(tilt, 0f, 0f);
+        cam.transform.position = BuildingCenter - cam.transform.forward * 40f;
         cam.orthographic = true;
-        // Fit width and height for any aspect ratio, plus a small margin.
-        cam.orthographicSize = Mathf.Max(imgH / 2f + 2f, (imgW / 2f + 2f) / cam.aspect);
+        // Fit the tilted footprint (ground depth + wall height) plus a margin.
+        float rad = tilt * Mathf.Deg2Rad;
+        float needH = imgH * Mathf.Sin(rad) + WallHeight * Mathf.Cos(rad) + 4f;
+        cam.orthographicSize = Mathf.Max(needH / 2f, (imgW + 4f) / 2f / cam.aspect);
 
         // 6. Bake the NavMesh at runtime from everything just built.
         gameObject.AddComponent<NavMeshSurface>().BuildNavMesh();
