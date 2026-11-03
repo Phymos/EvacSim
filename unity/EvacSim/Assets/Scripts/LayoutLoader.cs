@@ -31,7 +31,23 @@ public class LayoutLoader : MonoBehaviour
     const float PxPerMeter = 40f; // scale: 40 px = 1 m
     const float WallHeight = 3f;  // wall cubes are 3 m tall
 
+    public static string NextLayout = "layout.json"; // set by L/R keys before reload
+
     public List<Vector3> ExitCenters { get; private set; } // walkable exit points
+    public List<Vector3> DoorCenters { get; private set; } // door i in layout order
+    public float MidX { get; private set; }
+    public float CorridorZMin { get; private set; }
+    public float CorridorZMax { get; private set; }
+
+    // Room 1/2 top-left/right, Room 3/4 bottom-left/right, else Corridor.
+    public string GetZone(Vector3 p)
+    {
+        if (p.z <= CorridorZMax && p.z >= CorridorZMin)
+            return "Corridor";
+        if (p.z > CorridorZMax)
+            return p.x < MidX ? "Room 1" : "Room 2";
+        return p.x < MidX ? "Room 3" : "Room 4";
+    }
     public Vector2 BuildingSize { get; private set; }      // (width, depth) in meters
     public Vector3 BuildingCenter { get; private set; }
     public Vector2 InteriorMin { get; private set; } // inside-outer-walls rect,
@@ -72,7 +88,7 @@ public class LayoutLoader : MonoBehaviour
             return;
 
         // 1. Load the JSON from StreamingAssets (copied from the repo root).
-        string path = Path.Combine(Application.streamingAssetsPath, "layout.json");
+        string path = Path.Combine(Application.streamingAssetsPath, NextLayout);
         if (!File.Exists(path))
         {
             Debug.LogError("Missing " + path + " (copy layout.json into StreamingAssets).");
@@ -106,20 +122,26 @@ public class LayoutLoader : MonoBehaviour
         NoShadows(floor);
 
         // 3. One thin cube per wall rect (pixel x -> world x, pixel y -> world -z).
+        // Any overlap with an exit is cut out so the exit is a real opening.
         WallBounds = new List<Bounds>();
         IntRect top = null, bottom = null, left = null, right = null; // outer walls
         for (int i = 0; i < layout.walls.Length; i++)
         {
             IntRect r = layout.walls[i];
-            GameObject wall = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            wall.name = "Wall " + i;
-            wall.transform.parent = transform;
-            wall.transform.localScale = new Vector3(r.w / PxPerMeter, WallHeight, r.h / PxPerMeter);
-            wall.transform.position = new Vector3(
-                (r.x + r.w / 2f) / PxPerMeter, WallHeight / 2f, -(r.y + r.h / 2f) / PxPerMeter);
-            wall.GetComponent<Renderer>().material = wallMat;
-            NoShadows(wall);
-            WallBounds.Add(new Bounds(wall.transform.position, wall.transform.localScale));
+            List<IntRect> pieces = SubtractExits(r, layout.exits);
+            for (int k = 0; k < pieces.Count; k++)
+            {
+                IntRect p = pieces[k];
+                GameObject wall = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                wall.name = pieces.Count > 1 ? "Wall " + i + "_" + k : "Wall " + i;
+                wall.transform.parent = transform;
+                wall.transform.localScale = new Vector3(p.w / PxPerMeter, WallHeight, p.h / PxPerMeter);
+                wall.transform.position = new Vector3(
+                    (p.x + p.w / 2f) / PxPerMeter, WallHeight / 2f, -(p.y + p.h / 2f) / PxPerMeter);
+                wall.GetComponent<Renderer>().material = wallMat;
+                NoShadows(wall);
+                WallBounds.Add(new Bounds(wall.transform.position, wall.transform.localScale));
+            }
             // Track the extreme runs: they frame the building footprint.
             if (r.w >= r.h) // horizontal run
             {
@@ -133,10 +155,38 @@ public class LayoutLoader : MonoBehaviour
             }
         }
         // No door objects: the gaps between wall cubes ARE the doors.
+        DoorCenters = new List<Vector3>();
+        foreach (DoorData d in layout.doors)
+            DoorCenters.Add(new Vector3(d.x / PxPerMeter, 0f, -d.y / PxPerMeter));
 
         // Interior = inside the inner edges of the four outer walls.
         InteriorMin = new Vector2((left.x + left.w) / PxPerMeter, -bottom.y / PxPerMeter);
         InteriorMax = new Vector2(right.x / PxPerMeter, -(top.y + top.h) / PxPerMeter);
+
+        // Corridor band = between the two middle horizontal wall rows.
+        MidX = (InteriorMin.x + InteriorMax.x) / 2f;
+        List<IntRect> horiz = new List<IntRect>();
+        foreach (IntRect r in layout.walls)
+            if (r.w >= r.h && r != top && r != bottom)
+                horiz.Add(r);
+        horiz.Sort((a, b) => a.y.CompareTo(b.y));
+        if (horiz.Count >= 2)
+        {
+            int mid = horiz.Count / 2;
+            int upperBot = int.MinValue, lowerTop = int.MaxValue;
+            for (int i = 0; i < mid; i++)
+                upperBot = Mathf.Max(upperBot, horiz[i].y + horiz[i].h);
+            for (int i = mid; i < horiz.Count; i++)
+                lowerTop = Mathf.Min(lowerTop, horiz[i].y);
+            CorridorZMax = -upperBot / PxPerMeter;
+            CorridorZMin = -lowerTop / PxPerMeter;
+        }
+        else // fallback: middle 20% of the interior depth
+        {
+            float span = InteriorMax.y - InteriorMin.y;
+            CorridorZMax = InteriorMin.y + span * 0.6f;
+            CorridorZMin = InteriorMin.y + span * 0.4f;
+        }
 
         // 4. One trigger zone per exit rect, with a green pad so you can see it.
         ExitCenters = new List<Vector3>();
@@ -178,5 +228,43 @@ public class LayoutLoader : MonoBehaviour
 
         // 6. Bake the NavMesh at runtime from everything just built.
         gameObject.AddComponent<NavMeshSurface>().BuildNavMesh();
+    }
+
+    static bool Overlaps(IntRect a, IntRect b)
+    {
+        return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+    }
+
+    // Wall rect minus every exit rect, as 0+ disjoint pixel rects.
+    static List<IntRect> SubtractExits(IntRect wall, IntRect[] exits)
+    {
+        List<IntRect> rects = new List<IntRect> { wall };
+        foreach (IntRect ex in exits)
+        {
+            List<IntRect> next = new List<IntRect>();
+            foreach (IntRect rc in rects)
+            {
+                if (!Overlaps(rc, ex))
+                {
+                    next.Add(rc);
+                    continue;
+                }
+                if (ex.x > rc.x)
+                    next.Add(new IntRect { x = rc.x, y = rc.y, w = ex.x - rc.x, h = rc.h });
+                if (ex.x + ex.w < rc.x + rc.w)
+                    next.Add(new IntRect { x = ex.x + ex.w, y = rc.y, w = rc.x + rc.w - ex.x - ex.w, h = rc.h });
+                int mx0 = Mathf.Max(rc.x, ex.x), mx1 = Mathf.Min(rc.x + rc.w, ex.x + ex.w);
+                if (mx1 > mx0)
+                {
+                    if (ex.y > rc.y)
+                        next.Add(new IntRect { x = mx0, y = rc.y, w = mx1 - mx0, h = ex.y - rc.y });
+                    if (ex.y + ex.h < rc.y + rc.h)
+                        next.Add(new IntRect { x = mx0, y = ex.y + ex.h, w = mx1 - mx0, h = rc.y + rc.h - ex.y - ex.h });
+                }
+            }
+            rects = next;
+        }
+        rects.RemoveAll(q => q.w <= 0 || q.h <= 0);
+        return rects;
     }
 }

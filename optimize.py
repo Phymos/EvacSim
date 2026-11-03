@@ -2,9 +2,9 @@
 
 Usage:
     set MODEL_API_KEY=your-key   (Windows: $env:MODEL_API_KEY="your-key")
-    python optimize.py
+    python optimize.py [layout.json] [results.json] [layout_v2.json]
 
-Reads layout.json (pixel geometry, origin top-left) and results.json
+Reads layout pixels (origin top-left) and results summary
 (hand-made evacuation summary), sends both to Muse Spark over the
 Responses API, and requires back ONLY JSON:
 {"changes": [{"type": "widen_door|add_exit|move_wall",
@@ -292,11 +292,15 @@ def main():
     api_key = os.environ.get("MODEL_API_KEY")
     if not api_key:
         sys.exit("Missing MODEL_API_KEY environment variable.")
-    for path in (LAYOUT_PATH, RESULTS_PATH, IMAGE_PATH):
+    layout_path = sys.argv[1] if len(sys.argv) > 1 else LAYOUT_PATH
+    results_path = sys.argv[2] if len(sys.argv) > 2 else RESULTS_PATH
+    v2_path = sys.argv[3] if len(sys.argv) > 3 else V2_PATH
+    check_path = CHECK_PATH if v2_path == V2_PATH else v2_path.replace(".json", "_check.png")
+    for path in (layout_path, results_path, IMAGE_PATH):
         if not os.path.isfile(path):
             sys.exit("Missing input file: %s" % path)
-    layout = json.load(open(LAYOUT_PATH, encoding="utf-8"))
-    results = json.load(open(RESULTS_PATH, encoding="utf-8"))
+    layout = json.load(open(layout_path, encoding="utf-8"))
+    results = json.load(open(results_path, encoding="utf-8"))
 
     prompt = PROMPT_TEMPLATE.format(
         layout=json.dumps(layout), results=json.dumps(results))
@@ -320,14 +324,14 @@ def main():
         reply = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         sys.exit("Reply was not valid JSON (%s); %s not written."
-                 % (exc, V2_PATH))
+                 % (exc, v2_path))
     try:
         changes = validate_reply(reply, layout)
         v2, highlights = apply_changes(layout, changes)
     except ValueError as exc:
-        sys.exit("Invalid proposal (%s); %s not written." % (exc, V2_PATH))
+        sys.exit("Invalid proposal (%s); %s not written." % (exc, v2_path))
 
-    with open(V2_PATH, "w", encoding="utf-8") as f:
+    with open(v2_path, "w", encoding="utf-8") as f:
         json.dump(v2, f, indent=2)
         f.write("\n")
     for change in changes:
@@ -335,11 +339,11 @@ def main():
               % (change["type"], change["target_id"],
                  json.dumps(change["new_geometry"]), change["reason"]))
     print("Expected effect: %s" % reply["expected_effect"])
-    print("Saved %s with %d change(s)." % (V2_PATH, len(changes)))
+    print("Saved %s with %d change(s)." % (v2_path, len(changes)))
 
     base = cv2.imread(IMAGE_PATH, cv2.IMREAD_COLOR)
-    cv2.imwrite(CHECK_PATH, draw_check(base, v2, highlights))
-    print("Saved %s for visual verification." % CHECK_PATH)
+    cv2.imwrite(check_path, draw_check(base, v2, highlights))
+    print("Saved %s for visual verification." % check_path)
 
 
 if __name__ == "__main__":
