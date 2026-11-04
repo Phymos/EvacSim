@@ -267,11 +267,11 @@ public class EvacManager : MonoBehaviour
             if (speed >= StuckSpeed)
             {
                 stuckTime[go] = 0f;
-                agentMats[go].color = ColorForStuck(0f);
+                SetTint(agentMats[go], ColorForStuck(0f));
                 continue;
             }
             stuckTime[go] += dt;
-            agentMats[go].color = ColorForStuck(stuckTime[go]);
+            SetTint(agentMats[go], ColorForStuck(stuckTime[go]));
             zoneStuck[zone]++;
             string near = NearestBottleneck(pos);
             if (near != null)
@@ -280,6 +280,9 @@ public class EvacManager : MonoBehaviour
                 waitAgents[near].Add(go);
             }
         }
+        for (int ix = 0; ix < heatNX; ix++)
+            for (int iz = 0; iz < heatNZ; iz++)
+                heat[ix, iz] = (int)(heat[ix, iz] * 0.99f);
         UpdateHeatColors();
     }
 
@@ -292,23 +295,45 @@ public class EvacManager : MonoBehaviour
         return Color.Lerp(Color.yellow, Color.red, (k - 0.5f) * 2f);
     }
 
-    static Material TransparentRed(float alpha)
+    static void SetTint(Material m, Color c)
     {
-        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (m.HasProperty("_BaseColor"))
+            m.SetColor("_BaseColor", c);
+        else
+            m.color = c;
+    }
+
+    // Normalized heat 0..1 -> transparent -> yellow -> orange -> red, max 55% opaque.
+    static Color HeatColor(float t)
+    {
+        t = Mathf.Clamp01(t);
+        Color c = t < 0.5f
+            ? Color.Lerp(Color.yellow, new Color(1f, 0.5f, 0f), t * 2f)
+            : Color.Lerp(new Color(1f, 0.5f, 0f), Color.red, (t - 0.5f) * 2f);
+        c.a = Mathf.Min(0.55f, t);
+        return c;
+    }
+
+    static Material HeatMaterial(Color c)
+    {
+        Shader shader = Shader.Find("EvacSim/HeatCell");
+        if (shader == null)
+            shader = Shader.Find("Universal Render Pipeline/Unlit");
         if (shader == null)
             shader = Shader.Find("Unlit/Color");
         Material m = new Material(shader);
-        m.color = new Color(1f, 0f, 0f, alpha);
-        m.SetFloat("_Surface", 1f);
-        m.SetFloat("_Blend", 0f);
-        m.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
-        m.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-        m.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-        m.SetInt("_ZWrite", 0);
-        m.DisableKeyword("_ALPHATEST_ON");
-        m.EnableKeyword("_ALPHABLEND_ON");
-        m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-        m.renderQueue = 3000;
+        SetTint(m, c);
+        if (shader.name != "EvacSim/HeatCell")
+        {
+            // Fallback: force the stock shader transparent.
+            m.SetFloat("_Surface", 1f);
+            m.SetFloat("_Blend", 0f);
+            m.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+            m.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            m.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            m.SetInt("_ZWrite", 0);
+            m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+        }
         return m;
     }
 
@@ -321,7 +346,7 @@ public class EvacManager : MonoBehaviour
         heatCells = new Renderer[heatNX, heatNZ];
         heatMats = new Material[10];
         for (int i = 0; i < 10; i++)
-            heatMats[i] = TransparentRed(i / 9f * 0.55f);
+            heatMats[i] = HeatMaterial(HeatColor(i / 9f));
         heatRoot = new GameObject("Heatmap");
         heatRoot.transform.parent = transform;
         for (int ix = 0; ix < heatNX; ix++)
@@ -347,7 +372,7 @@ public class EvacManager : MonoBehaviour
     {
         int ix = Mathf.Clamp(Mathf.FloorToInt(pos.x), 0, heatNX - 1);
         int iz = Mathf.Clamp(Mathf.FloorToInt(-pos.z), 0, heatNZ - 1);
-        heat[ix, iz]++;
+        heat[ix, iz] = Mathf.Min(heat[ix, iz] + 1, 1000);
     }
 
     void UpdateHeatColors()
