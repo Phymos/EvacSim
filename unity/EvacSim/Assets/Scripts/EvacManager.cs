@@ -3,16 +3,18 @@ using System.IO;
 using System.Text;
 using UnityEngine;
 using UnityEngine.AI; // NavMeshAgent lives here
+using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
 
 // Spawns agents, sends each to its nearest exit, tracks the evacuation.
 public class EvacManager : MonoBehaviour
 {
-    public int agentCount = 250; // how many people to spawn
+    public int agentCount = 300; // how many people to spawn
 
-    const int MaxSpawnTries = 50;  // attempts per agent before giving up
+    const int MaxSpawnTries = 80;  // attempts per agent before giving up
     const float WallClearance = 0.5f;  // min meters from any wall
-    const float AgentSpacing = 0.6f;   // min meters between agents
+    const float AgentSpacing = 0.8f;   // min meters between agents
+    const float GracePeriod = 4f;      // no stuck/congestion tracking right after spawn
     const float StuckSpeed = 0.3f;     // slower than this = stuck
     const float SampleInterval = 0.5f; // congestion sampling period
     const float BottleneckRadius = 2f; // stuck attributed within this range
@@ -31,8 +33,29 @@ public class EvacManager : MonoBehaviour
     readonly Dictionary<string, int> zoneTotal = new Dictionary<string, int>();
     readonly Dictionary<string, int> zoneStuck = new Dictionary<string, int>();
     readonly Dictionary<string, float> waitTotal = new Dictionary<string, float>();
-    readonly Dictionary<string, HashSet<int>> waitAgents = new Dictionary<string, HashSet<int>>();
+    readonly Dictionary<string, HashSet<GameObject>> waitAgents = new Dictionary<string, HashSet<GameObject>>();
     float sampleTimer;
+
+    readonly Dictionary<GameObject, float> stuckTime = new Dictionary<GameObject, float>();
+    readonly Dictionary<GameObject, Material> agentMats = new Dictionary<GameObject, Material>();
+    int[,] heat;
+    Renderer[,] heatCells;
+    Material[] heatMats;
+    GameObject heatRoot;
+    int heatNX, heatNZ;
+    bool showHeat;
+    static readonly Dictionary<string, float> sessionTimes = new Dictionary<string, float>();
+
+    static string LabelFor(string file)
+    {
+        if (file == "layout_bad.json")
+            return "bad";
+        if (file == "layout_tight.json")
+            return "tight";
+        if (file == "layout_v2.json")
+            return "AI v2";
+        return "base";
+    }
 
     void Start()
     {
@@ -61,6 +84,8 @@ public class EvacManager : MonoBehaviour
         for (int i = 0; i < loader.ExitCenters.Count; i++)
             ResetBottleneck("exit " + i);
 
+        BuildHeatmap();
+
         for (int i = 0; i < agentCount; i++)
             if (TrySpawn("Person " + i))
                 spawned++;
@@ -70,7 +95,7 @@ public class EvacManager : MonoBehaviour
     void ResetBottleneck(string id)
     {
         waitTotal[id] = 0f;
-        waitAgents[id] = new HashSet<int>();
+        waitAgents[id] = new HashSet<GameObject>();
     }
 
     // Random point strictly inside the building, snapped to the NavMesh.
@@ -112,7 +137,10 @@ public class EvacManager : MonoBehaviour
         go.name = agentName;
         go.transform.parent = transform;
         go.transform.position = feet + Vector3.up * 1f;
-        go.GetComponent<Renderer>().material = loader.AgentMaterial;
+        Material mat = new Material(loader.AgentMaterial);
+        go.GetComponent<Renderer>().material = mat;
+        agentMats[go] = mat;
+        stuckTime[go] = 0f;
 
         NavMeshAgent agent = go.AddComponent<NavMeshAgent>();
         agent.radius = 0.3f;
@@ -169,23 +197,34 @@ public class EvacManager : MonoBehaviour
         evacuated++;
         agents.Remove(agent);
         lastPos.Remove(agent);
+        stuckTime.Remove(agent);
+        agentMats.Remove(agent);
         Destroy(agent);
     }
 
     void Update()
     {
-        if (Input.GetKeyDown(KeyCode.L))
+        Keyboard kb = Keyboard.current;
+        if (kb != null && kb.lKey.wasPressedThisFrame)
         {
             LayoutLoader.NextLayout = "layout_v2.json";
             SceneManager.LoadScene(SceneManager.GetActiveScene().name);
             return;
         }
-        if (Input.GetKeyDown(KeyCode.R))
+        if (kb != null && kb.rKey.wasPressedThisFrame)
         {
             LayoutLoader.NextLayout = "layout_tight.json";
             SceneManager.LoadScene(SceneManager.GetActiveScene().name);
             return;
         }
+        if (kb != null && kb.bKey.wasPressedThisFrame)
+        {
+            LayoutLoader.NextLayout = "layout_bad.json";
+            SceneManager.LoadScene(SceneManager.GetActiveScene().name);
+            return;
+        }
+        if (kb != null && kb.hKey.wasPressedThisFrame)
+            SetHeat(!showHeat);
         if (finished)
             return;
         elapsed = Time.time - startTime;
@@ -193,6 +232,7 @@ public class EvacManager : MonoBehaviour
         if (spawned > 0 && evacuated >= spawned)
         {
             finished = true;
+            sessionTimes[LabelFor(LayoutLoader.NextLayout)] = elapsed;
             WriteResults();
             Debug.Log("Evacuation complete: " + evacuated + " agents in " + elapsed.ToString("F1") + " s");
         }
@@ -200,6 +240,8 @@ public class EvacManager : MonoBehaviour
 
     void SampleCongestion()
     {
+        if (elapsed < GracePeriod)
+            return;
         sampleTimer += Time.deltaTime;
         if (sampleTimer < SampleInterval || agents.Count == 0)
             return;
@@ -219,18 +261,131 @@ public class EvacManager : MonoBehaviour
             }
             float speed = Vector3.Distance(pos, prev) / Mathf.Max(dt, 0.001f);
             lastPos[go] = pos;
+            HeatAdd(pos);
             string zone = loader.GetZone(pos);
             zoneTotal[zone]++;
             if (speed >= StuckSpeed)
+            {
+                stuckTime[go] = 0f;
+                agentMats[go].color = ColorForStuck(0f);
                 continue;
+            }
+            stuckTime[go] += dt;
+            agentMats[go].color = ColorForStuck(stuckTime[go]);
             zoneStuck[zone]++;
             string near = NearestBottleneck(pos);
             if (near != null)
             {
                 waitTotal[near] += dt;
-                waitAgents[near].Add(go.GetInstanceID());
+                waitAgents[near].Add(go);
             }
         }
+        UpdateHeatColors();
+    }
+
+    // Green when flowing, through yellow to red after ~8 s stuck.
+    static Color ColorForStuck(float t)
+    {
+        float k = Mathf.Clamp01(t / 8f);
+        if (k < 0.5f)
+            return Color.Lerp(new Color(0.15f, 0.85f, 0.3f), Color.yellow, k * 2f);
+        return Color.Lerp(Color.yellow, Color.red, (k - 0.5f) * 2f);
+    }
+
+    static Material TransparentRed(float alpha)
+    {
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null)
+            shader = Shader.Find("Unlit/Color");
+        Material m = new Material(shader);
+        m.color = new Color(1f, 0f, 0f, alpha);
+        m.SetFloat("_Surface", 1f);
+        m.SetFloat("_Blend", 0f);
+        m.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+        m.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        m.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        m.SetInt("_ZWrite", 0);
+        m.DisableKeyword("_ALPHATEST_ON");
+        m.EnableKeyword("_ALPHABLEND_ON");
+        m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        m.renderQueue = 3000;
+        return m;
+    }
+
+    // One 1 m quad per cell over the building footprint, hidden until H.
+    void BuildHeatmap()
+    {
+        heatNX = Mathf.CeilToInt(loader.BuildingSize.x);
+        heatNZ = Mathf.CeilToInt(loader.BuildingSize.y);
+        heat = new int[heatNX, heatNZ];
+        heatCells = new Renderer[heatNX, heatNZ];
+        heatMats = new Material[10];
+        for (int i = 0; i < 10; i++)
+            heatMats[i] = TransparentRed(i / 9f * 0.55f);
+        heatRoot = new GameObject("Heatmap");
+        heatRoot.transform.parent = transform;
+        for (int ix = 0; ix < heatNX; ix++)
+            for (int iz = 0; iz < heatNZ; iz++)
+            {
+                GameObject q = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                q.name = "H";
+                q.transform.parent = heatRoot.transform;
+                q.transform.rotation = Quaternion.Euler(-90f, 0f, 0f);
+                q.transform.position = new Vector3(ix + 0.5f, 0.02f, -(iz + 0.5f));
+                Destroy(q.GetComponent<MeshCollider>());
+                Renderer r = q.GetComponent<Renderer>();
+                r.sharedMaterial = heatMats[0];
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                r.receiveShadows = false;
+                r.enabled = false;
+                heatCells[ix, iz] = r;
+            }
+        heatRoot.SetActive(false);
+    }
+
+    void HeatAdd(Vector3 pos)
+    {
+        int ix = Mathf.Clamp(Mathf.FloorToInt(pos.x), 0, heatNX - 1);
+        int iz = Mathf.Clamp(Mathf.FloorToInt(-pos.z), 0, heatNZ - 1);
+        heat[ix, iz]++;
+    }
+
+    void UpdateHeatColors()
+    {
+        int max = 1;
+        for (int ix = 0; ix < heatNX; ix++)
+            for (int iz = 0; iz < heatNZ; iz++)
+                if (heat[ix, iz] > max)
+                    max = heat[ix, iz];
+        for (int ix = 0; ix < heatNX; ix++)
+            for (int iz = 0; iz < heatNZ; iz++)
+            {
+                int c = heat[ix, iz];
+                Renderer r = heatCells[ix, iz];
+                if (c <= 0)
+                {
+                    r.enabled = false;
+                    continue;
+                }
+                r.enabled = true;
+                r.sharedMaterial = heatMats[Mathf.Clamp(Mathf.CeilToInt(9f * c / max), 1, 9)];
+            }
+    }
+
+    void SetHeat(bool on)
+    {
+        showHeat = on;
+        if (on)
+            UpdateHeatColors();
+        else if (heatCells != null)
+        {
+            for (int ix = 0; ix < heatNX; ix++)
+                for (int iz = 0; iz < heatNZ; iz++)
+                    heatCells[ix, iz].enabled = false;
+        }
+        if (heatRoot != null)
+            heatRoot.SetActive(on);
+        Debug.Log("Heatmap " + (on ? "ON" : "OFF"));
     }
 
     string NearestBottleneck(Vector3 pos)
@@ -305,11 +460,31 @@ public class EvacManager : MonoBehaviour
 
     void OnGUI()
     {
-        GUILayout.BeginArea(new Rect(10, 10, 240, 130), "Evacuation", GUI.skin.window);
+        GUI.skin.label.fontSize = 20;
+        GUI.skin.window.fontSize = 20;
+        GUILayout.BeginArea(new Rect(10, 10, 340, 260), "Evacuation", GUI.skin.window);
+        GUILayout.Label("Layout: " + LabelFor(LayoutLoader.NextLayout));
         GUILayout.Label("Time: " + elapsed.ToString("F1") + " s");
-        GUILayout.Label("Evacuated: " + evacuated);
+        GUILayout.Label("Evacuated: " + evacuated + " / " + spawned);
         GUILayout.Label("Remaining: " + (spawned - evacuated));
-        GUILayout.Label("[L] layout_v2  [R] layout_tight");
+        GUILayout.Label("[L] v2 [R] tight [B] bad");
+        GUILayout.Label("[H] heat: " + (showHeat ? "ON" : "off") + " | WASD pan, QE orbit, drag tilt, wheel zoom");
         GUILayout.EndArea();
+
+        if (sessionTimes.Count > 0)
+        {
+            GUILayout.BeginArea(new Rect(10, 280, 340, 60 + sessionTimes.Count * 30),
+                "Runs", GUI.skin.window);
+            float best = float.MaxValue, worst = 0f;
+            foreach (KeyValuePair<string, float> kv in sessionTimes)
+            {
+                GUILayout.Label(kv.Key + ": " + kv.Value.ToString("F1") + " s");
+                best = Mathf.Min(best, kv.Value);
+                worst = Mathf.Max(worst, kv.Value);
+            }
+            if (sessionTimes.Count > 1 && worst > 0f)
+                GUILayout.Label("Improvement: " + ((worst - best) / worst * 100f).ToString("F0") + "%");
+            GUILayout.EndArea();
+        }
     }
 }

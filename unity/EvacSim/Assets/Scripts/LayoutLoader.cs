@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using Unity.AI.Navigation; // AI Navigation package (NavMeshSurface)
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 // JSON classes must match layout.json keys exactly (JsonUtility maps by name).
 [System.Serializable]
@@ -23,6 +24,29 @@ public class LayoutData
     public IntRect[] walls;
     public IntRect[] exits;
     public DoorData[] doors;
+}
+
+[System.Serializable]
+public class ChangeGeom
+{
+    public int width;
+    public int x, y, w, h;
+}
+
+[System.Serializable]
+public class ChangeItem
+{
+    public string type;
+    public string target_id;
+    public ChangeGeom new_geometry;
+    public string reason;
+}
+
+[System.Serializable]
+public class ChangesData
+{
+    public ChangeItem[] changes;
+    public string expected_effect;
 }
 
 // Builds the 3D floor plan from layout.json, then bakes the NavMesh.
@@ -55,6 +79,12 @@ public class LayoutLoader : MonoBehaviour
     public List<Bounds> WallBounds { get; private set; } // world-space wall boxes
     public Material AgentMaterial { get; private set; }  // shared agent color
     public bool IsBuilt { get; private set; }
+
+    Material exitMat;
+    Camera simCam;
+    DoorData[] doors;
+    ChangesData v2changes;
+    float buildTime;
 
     void Start()
     {
@@ -109,8 +139,8 @@ public class LayoutLoader : MonoBehaviour
 
         Material wallMat = Solid(new Color(0.16f, 0.16f, 0.20f));   // dark walls
         Material floorMat = Solid(new Color(0.83f, 0.83f, 0.85f));  // light floor
-        Material exitMat = Solid(new Color(0.10f, 0.80f, 0.25f));   // green exits
-        AgentMaterial = Solid(new Color(1f, 0.40f, 0.10f));         // orange agents
+        exitMat = Solid(new Color(0.10f, 0.80f, 0.25f));   // green exits
+        AgentMaterial = Solid(new Color(0.15f, 0.85f, 0.30f)); // green agents (red when stuck)
 
         // 2. Floor plane covering the whole image (a Unity Plane is 10x10 m).
         GameObject floor = GameObject.CreatePrimitive(PrimitiveType.Plane);
@@ -158,6 +188,7 @@ public class LayoutLoader : MonoBehaviour
         DoorCenters = new List<Vector3>();
         foreach (DoorData d in layout.doors)
             DoorCenters.Add(new Vector3(d.x / PxPerMeter, 0f, -d.y / PxPerMeter));
+        doors = layout.doors;
 
         // Interior = inside the inner edges of the four outer walls.
         InteriorMin = new Vector2((left.x + left.w) / PxPerMeter, -bottom.y / PxPerMeter);
@@ -213,11 +244,11 @@ public class LayoutLoader : MonoBehaviour
             ExitCenters.Add(new Vector3(zone.transform.position.x, 0f, zone.transform.position.z));
         }
 
-        // 5. Top-down camera (90 degrees) looking at the building center.
+        // 5. Tilted camera (~55 degrees) framing the whole building.
         Camera cam = Camera.main;
         if (cam == null)
             cam = new GameObject("TopDownCamera").AddComponent<Camera>();
-        const float tilt = 90f;
+        const float tilt = 55f;
         cam.transform.rotation = Quaternion.Euler(tilt, 0f, 0f);
         cam.transform.position = BuildingCenter - cam.transform.forward * 40f;
         cam.orthographic = true;
@@ -225,9 +256,168 @@ public class LayoutLoader : MonoBehaviour
         float rad = tilt * Mathf.Deg2Rad;
         float needH = imgH * Mathf.Sin(rad) + WallHeight * Mathf.Cos(rad) + 4f;
         cam.orthographicSize = Mathf.Max(needH / 2f, (imgW + 4f) / 2f / cam.aspect);
+        simCam = cam;
 
         // 6. Bake the NavMesh at runtime from everything just built.
         gameObject.AddComponent<NavMeshSurface>().BuildNavMesh();
+
+        buildTime = Time.time;
+        if (NextLayout == "layout_v2.json")
+            LoadV2Changes();
+    }
+
+    void Update()
+    {
+        if (exitMat != null)
+        {
+            float k = 0.5f + 0.5f * Mathf.Sin(Time.time * 3f);
+            exitMat.color = Color.Lerp(new Color(0.08f, 0.65f, 0.2f), new Color(0.35f, 1f, 0.45f), k);
+        }
+        MoveCamera();
+    }
+
+    // WASD/arrows pan, Q/E or right-drag orbit, PgUp/PgDn or right-drag tilt, wheel or +/- zoom.
+    void MoveCamera()
+    {
+        if (simCam == null)
+            return;
+        Vector2 pan = Vector2.zero;
+        float zoomKey = 0f;
+        float yawKey = 0f;
+        float tiltKey = 0f;
+        Keyboard kb = Keyboard.current;
+        if (kb != null)
+        {
+            if (kb.wKey.isPressed || kb.upArrowKey.isPressed)
+                pan.y += 1f;
+            if (kb.sKey.isPressed || kb.downArrowKey.isPressed)
+                pan.y -= 1f;
+            if (kb.aKey.isPressed || kb.leftArrowKey.isPressed)
+                pan.x -= 1f;
+            if (kb.dKey.isPressed || kb.rightArrowKey.isPressed)
+                pan.x += 1f;
+            if (kb.equalsKey.isPressed)
+                zoomKey += 1f;
+            if (kb.minusKey.isPressed)
+                zoomKey -= 1f;
+            if (kb.qKey.isPressed)
+                yawKey -= 1f;
+            if (kb.eKey.isPressed)
+                yawKey += 1f;
+            if (kb.pageUpKey.isPressed)
+                tiltKey += 1f;
+            if (kb.pageDownKey.isPressed)
+                tiltKey -= 1f;
+        }
+        float wheel = 0f;
+        float yawDrag = 0f;
+        float tiltDrag = 0f;
+        Mouse m = Mouse.current;
+        if (m != null)
+        {
+            wheel = m.scroll.ReadValue().y / 120f;
+            if (m.rightButton.isPressed)
+            {
+                Vector2 md = m.delta.ReadValue();
+                yawDrag = -md.x * 0.3f;
+                tiltDrag = -md.y * 0.25f;
+            }
+        }
+        // Orbit/tilt around whatever the camera is looking at on the ground.
+        Vector3 look = simCam.transform.position;
+        float fy = simCam.transform.forward.y;
+        if (Mathf.Abs(fy) > 0.01f)
+            look += simCam.transform.forward * (-look.y / fy);
+        float yaw = yawKey * 60f * Time.deltaTime + yawDrag;
+        if (yaw != 0f)
+            simCam.transform.RotateAround(look, Vector3.up, yaw);
+        float tiltDelta = tiltKey * 40f * Time.deltaTime + tiltDrag;
+        if (tiltDelta != 0f)
+        {
+            float cur = Mathf.Asin(Mathf.Clamp(-simCam.transform.forward.y, -1f, 1f)) * Mathf.Rad2Deg;
+            float want = Mathf.Clamp(cur + tiltDelta, 20f, 85f);
+            if (want != cur)
+                simCam.transform.RotateAround(look, simCam.transform.right, want - cur);
+        }
+        Vector3 fwd = simCam.transform.forward;
+        fwd.y = 0f;
+        fwd.Normalize();
+        Vector3 right = simCam.transform.right;
+        right.y = 0f;
+        right.Normalize();
+        float panSpeed = simCam.orthographicSize * 1.2f;
+        Vector3 p = simCam.transform.position + (fwd * pan.y + right * pan.x) * panSpeed * Time.deltaTime;
+        p.x = Mathf.Clamp(p.x, BuildingCenter.x - 25f, BuildingCenter.x + 25f);
+        p.z = Mathf.Clamp(p.z, BuildingCenter.z - 25f, BuildingCenter.z + 25f);
+        simCam.transform.position = p;
+        float size = simCam.orthographicSize - zoomKey * 12f * Time.deltaTime - wheel * 2f;
+        simCam.orthographicSize = Mathf.Clamp(size, 4f, 40f);
+    }
+
+    void OnGUI()
+    {
+        if (v2changes == null || v2changes.changes == null || Time.time - buildTime > 10f)
+            return;
+        GUI.skin.label.fontSize = 18;
+        GUI.skin.window.fontSize = 18;
+        int h = 60 + (v2changes.changes.Length + 1) * 30;
+        GUILayout.BeginArea(new Rect(10, Screen.height - h - 10, 780, h),
+            "Spark proposal", GUI.skin.window);
+        foreach (ChangeItem c in v2changes.changes)
+            GUILayout.Label(c.type + " " + c.target_id + ": " + c.reason);
+        GUILayout.Label("Expected: " + v2changes.expected_effect);
+        GUILayout.EndArea();
+    }
+
+    void LoadV2Changes()
+    {
+        string path = Path.Combine(Application.streamingAssetsPath, "layout_v2_changes.json");
+        if (!File.Exists(path))
+        {
+            Debug.LogWarning("Missing " + path + " (no Spark reasons to show).");
+            return;
+        }
+        v2changes = JsonUtility.FromJson<ChangesData>(File.ReadAllText(path));
+        HighlightV2();
+    }
+
+    // Widened doors get a yellow disc, added exits a yellow rim.
+    void HighlightV2()
+    {
+        if (v2changes == null || v2changes.changes == null)
+            return;
+        Material yellow = Solid(Color.yellow);
+        foreach (ChangeItem c in v2changes.changes)
+        {
+            if (c.type == "widen_door" && c.target_id.StartsWith("door "))
+            {
+                int i;
+                if (!int.TryParse(c.target_id.Substring(5), out i) || i < 0 || i >= DoorCenters.Count)
+                    continue;
+                float r = Mathf.Max(doors[i].width / PxPerMeter / 2f, 0.4f);
+                GameObject disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                disc.name = "Widened " + i;
+                disc.transform.parent = transform;
+                disc.transform.position = new Vector3(DoorCenters[i].x, 0.1f, DoorCenters[i].z);
+                disc.transform.localScale = new Vector3(r * 2f, 0.03f, r * 2f);
+                disc.GetComponent<Renderer>().material = yellow;
+                NoShadows(disc);
+                Destroy(disc.GetComponent<CapsuleCollider>());
+            }
+            else if (c.type == "add_exit" && c.new_geometry != null)
+            {
+                ChangeGeom g = c.new_geometry;
+                GameObject rim = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                rim.name = "NewExit";
+                rim.transform.parent = transform;
+                rim.transform.localScale = new Vector3(g.w / PxPerMeter + 0.4f, 0.1f, g.h / PxPerMeter + 0.4f);
+                rim.transform.position = new Vector3(
+                    (g.x + g.w / 2f) / PxPerMeter, 0.05f, -(g.y + g.h / 2f) / PxPerMeter);
+                rim.GetComponent<Renderer>().material = yellow;
+                NoShadows(rim);
+                Destroy(rim.GetComponent<BoxCollider>());
+            }
+        }
     }
 
     static bool Overlaps(IntRect a, IntRect b)

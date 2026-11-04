@@ -1,0 +1,15 @@
+{
+  "evacuation_time_s": 22.7,
+  "congestion_by_zone": {
+    "Room 1": 0.33,
+    "Room 2": 0.27,
+    "Room 3": 0.26,
+    "Room 4": 0.29,
+    "Corridor": 0.08
+  },
+  "bottlenecks": [
+    {"rank": 1, "id": "door 4", "avg_wait_s": 3.7},
+    {"rank": 2, "id": "door 2", "avg_wait_s": 3.4},
+    {"rank": 3, "id": "door 1", "avg_wait_s": 3.3}
+  ]
+}

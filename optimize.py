@@ -45,6 +45,7 @@ RESULTS_PATH = "results.json"
 IMAGE_PATH = "floorplan.png"
 V2_PATH = "layout_v2.json"
 CHECK_PATH = "layout_v2_check.png"
+CHANGES_PATH = "layout_v2_changes.json"
 
 PX_PER_M = 40
 MIN_DOOR_PX = 36  # 0.9 m minimum door width
@@ -186,6 +187,7 @@ def validate_reply(reply, layout):
         raise ValueError("expected_effect must be a non-empty string")
     width, height = layout["image_size"]
     seen_targets = set()
+    new_exits = []
     for change in changes:
         if set(change) != {"type", "target_id", "new_geometry", "reason"}:
             raise ValueError("bad change keys: %s" % sorted(change))
@@ -198,9 +200,10 @@ def validate_reply(reply, layout):
             raise ValueError("change %r needs a non-empty reason" % target)
         if not isinstance(geom, dict):
             raise ValueError("change %r needs an object geometry" % target)
-        if (kind, target) in seen_targets:
-            raise ValueError("duplicate change for %r" % target)
-        seen_targets.add((kind, target))
+        if kind in ("widen_door", "move_wall"):
+            if (kind, target) in seen_targets:
+                raise ValueError("duplicate change for %r" % target)
+            seen_targets.add((kind, target))
         if kind == "widen_door":
             index = parse_target(target, "door", len(layout["doors"]))
             if set(geom) != {"width"} or not isinstance(geom["width"], int) \
@@ -222,6 +225,11 @@ def validate_reply(reply, layout):
             if target != "new":
                 raise ValueError("add_exit target_id must be 'new'")
             check_rect(geom, width, height, "add_exit")
+            if any(overlaps(geom, ex) for ex in layout["exits"]):
+                raise ValueError("add_exit overlaps an existing exit")
+            if any(overlaps(geom, ex) for ex in new_exits):
+                raise ValueError("add_exit overlaps another new exit")
+            new_exits.append(geom)
     return changes
 
 
@@ -296,6 +304,7 @@ def main():
     results_path = sys.argv[2] if len(sys.argv) > 2 else RESULTS_PATH
     v2_path = sys.argv[3] if len(sys.argv) > 3 else V2_PATH
     check_path = CHECK_PATH if v2_path == V2_PATH else v2_path.replace(".json", "_check.png")
+    changes_path = CHANGES_PATH if v2_path == V2_PATH else v2_path.replace(".json", "_changes.json")
     for path in (layout_path, results_path, IMAGE_PATH):
         if not os.path.isfile(path):
             sys.exit("Missing input file: %s" % path)
@@ -334,6 +343,11 @@ def main():
     with open(v2_path, "w", encoding="utf-8") as f:
         json.dump(v2, f, indent=2)
         f.write("\n")
+    with open(changes_path, "w", encoding="utf-8") as f:
+        json.dump({"changes": changes,
+                   "expected_effect": reply["expected_effect"]}, f, indent=2)
+        f.write("\n")
+    print("Saved %s." % changes_path)
     for change in changes:
         print("Change %s %s -> %s (%s)"
               % (change["type"], change["target_id"],
