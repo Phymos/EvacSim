@@ -7,9 +7,26 @@ using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
 
 // Spawns agents, sends each to its nearest exit, tracks the evacuation.
+[System.Serializable]
+public class RunConfig
+{
+    public int seed = 42; // written by loop.py before each run
+}
+
 public class EvacManager : MonoBehaviour
 {
     public int agentCount = 300; // how many people to spawn
+    public int spawnSeed = 42;   // default seed; run_config.json overrides per run
+    public float speedVar = 0f;  // agent speed variety, fraction (0 = off, 0.2 = +/-20%)
+    public float maxRunTime = 300f; // auto-finish failsafe so the loop never hangs
+
+    static bool autoMode; // Key A: loop layout_bad -> layout_next -> ...
+    static readonly List<float> roundTimes = new List<float>();
+    float pollTimer;
+    float autoWait;
+    string autoStatus = "waiting for layout_next.json (is loop.py running?)";
+    int currentSeed;
+    bool timedOut;
 
     const int MaxSpawnTries = 80;  // attempts per agent before giving up
     const float WallClearance = 0.5f;  // min meters from any wall
@@ -54,6 +71,10 @@ public class EvacManager : MonoBehaviour
             return "tight";
         if (file == "layout_v2.json")
             return "AI v2";
+        if (file.StartsWith("layout_auto_"))
+            return "auto";
+        if (file == "layout_next.json")
+            return "next";
         return "base";
     }
 
@@ -86,10 +107,19 @@ public class EvacManager : MonoBehaviour
 
         BuildHeatmap();
 
+        currentSeed = spawnSeed;
+        string cfg = Path.Combine(Application.streamingAssetsPath, "run_config.json");
+        if (File.Exists(cfg))
+        {
+            try { currentSeed = JsonUtility.FromJson<RunConfig>(File.ReadAllText(cfg)).seed; }
+            catch { currentSeed = spawnSeed; }
+        }
+        UnityEngine.Random.InitState(currentSeed);
         for (int i = 0; i < agentCount; i++)
             if (TrySpawn("Person " + i))
                 spawned++;
         startTime = Time.time;
+        WriteStatus("running");
     }
 
     void ResetBottleneck(string id)
@@ -144,7 +174,9 @@ public class EvacManager : MonoBehaviour
 
         NavMeshAgent agent = go.AddComponent<NavMeshAgent>();
         agent.radius = 0.3f;
-        agent.speed = 1.5f;
+        agent.speed = speedVar > 0f
+            ? 1.5f * (1f + UnityEngine.Random.Range(-speedVar, speedVar))
+            : 1.5f;
         agent.height = 2f;
         agent.baseOffset = -1f; // pivot is 1 m up; agent feet stay on ground
         agent.obstacleAvoidanceType = ObstacleAvoidanceType.HighQualityObstacleAvoidance;
@@ -205,20 +237,31 @@ public class EvacManager : MonoBehaviour
     void Update()
     {
         Keyboard kb = Keyboard.current;
+        if (kb != null && kb.oKey.wasPressedThisFrame)
+        {
+            autoMode = true;
+            roundTimes.Clear();
+            LayoutLoader.NextLayout = "layout_bad.json";
+            SceneManager.LoadScene(SceneManager.GetActiveScene().name);
+            return;
+        }
         if (kb != null && kb.lKey.wasPressedThisFrame)
         {
+            autoMode = false;
             LayoutLoader.NextLayout = "layout_v2.json";
             SceneManager.LoadScene(SceneManager.GetActiveScene().name);
             return;
         }
         if (kb != null && kb.rKey.wasPressedThisFrame)
         {
+            autoMode = false;
             LayoutLoader.NextLayout = "layout_tight.json";
             SceneManager.LoadScene(SceneManager.GetActiveScene().name);
             return;
         }
         if (kb != null && kb.bKey.wasPressedThisFrame)
         {
+            autoMode = false;
             LayoutLoader.NextLayout = "layout_bad.json";
             SceneManager.LoadScene(SceneManager.GetActiveScene().name);
             return;
@@ -226,16 +269,17 @@ public class EvacManager : MonoBehaviour
         if (kb != null && kb.hKey.wasPressedThisFrame)
             SetHeat(!showHeat);
         if (finished)
+        {
+            if (autoMode)
+                PollNextLayout();
             return;
+        }
         elapsed = Time.time - startTime;
         SampleCongestion();
         if (spawned > 0 && evacuated >= spawned)
-        {
-            finished = true;
-            sessionTimes[LabelFor(LayoutLoader.NextLayout)] = elapsed;
-            WriteResults();
-            Debug.Log("Evacuation complete: " + evacuated + " agents in " + elapsed.ToString("F1") + " s");
-        }
+            FinishRun(false);
+        else if (elapsed > maxRunTime)
+            FinishRun(true);
     }
 
     void SampleCongestion()
@@ -438,6 +482,29 @@ public class EvacManager : MonoBehaviour
         return best;
     }
 
+    void FinishRun(bool timeout)
+    {
+        finished = true;
+        timedOut = timeout;
+        autoWait = 0f;
+        if (autoMode)
+            roundTimes.Add(elapsed);
+        sessionTimes[LabelFor(LayoutLoader.NextLayout)] = elapsed;
+        WriteResults();
+        SaveHeatmapPng();
+        WriteStatus("done");
+        Debug.Log(timeout
+            ? "TIMEOUT: " + evacuated + "/" + spawned + " evacuated in " + elapsed.ToString("F1") + " s"
+            : "Evacuation complete: " + evacuated + " agents in " + elapsed.ToString("F1") + " s");
+    }
+
+    void WriteStatus(string state)
+    {
+        string p = Path.Combine(Application.streamingAssetsPath, "status.json");
+        File.WriteAllText(p, "{\"state\": \"" + state + "\", \"layout\": \""
+            + LayoutLoader.NextLayout + "\", \"seed\": " + currentSeed + "}\n");
+    }
+
     void WriteResults()
     {
         List<KeyValuePair<string, float>> ranked = new List<KeyValuePair<string, float>>();
@@ -451,6 +518,12 @@ public class EvacManager : MonoBehaviour
         StringBuilder sb = new StringBuilder();
         sb.Append("{\n  \"evacuation_time_s\": ");
         sb.Append(elapsed.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+        sb.Append(",\n  \"timed_out\": ");
+        sb.Append(timedOut ? "true" : "false");
+        sb.Append(",\n  \"agents_evacuated\": ");
+        sb.Append(evacuated);
+        sb.Append(",\n  \"agents_total\": ");
+        sb.Append(spawned);
         sb.Append(",\n  \"congestion_by_zone\": {");
         for (int i = 0; i < Zones.Length; i++)
         {
@@ -483,22 +556,100 @@ public class EvacManager : MonoBehaviour
         Debug.Log("Saved " + path);
     }
 
+    // Cheap top-down heat image for the Python loop (white -> yellow -> red).
+    void SaveHeatmapPng()
+    {
+        if (heat == null || heatNX <= 0 || heatNZ <= 0)
+            return;
+        int max = 1;
+        for (int ix = 0; ix < heatNX; ix++)
+            for (int iz = 0; iz < heatNZ; iz++)
+                if (heat[ix, iz] > max)
+                    max = heat[ix, iz];
+        Texture2D tex = new Texture2D(heatNX, heatNZ, TextureFormat.RGB24, false);
+        for (int ix = 0; ix < heatNX; ix++)
+            for (int iz = 0; iz < heatNZ; iz++)
+            {
+                Color hc = HeatColor((float)heat[ix, iz] / max);
+                tex.SetPixel(ix, iz, new Color(
+                    hc.r * hc.a + (1f - hc.a),
+                    hc.g * hc.a + (1f - hc.a),
+                    hc.b * hc.a + (1f - hc.a)));
+            }
+        tex.Apply();
+        string png = Path.Combine(Application.streamingAssetsPath, "heatmap.png");
+        File.WriteAllBytes(png, tex.EncodeToPNG());
+        Destroy(tex);
+        Debug.Log("Saved " + png);
+    }
+
+    // Auto mode: every 0.5 s, pick up a layout_next.json newer than results.json.
+    void PollNextLayout()
+    {
+        pollTimer += Time.deltaTime;
+        autoWait += Time.deltaTime;
+        if (pollTimer < 0.5f)
+            return;
+        pollTimer = 0f;
+        string dir = Application.streamingAssetsPath;
+        string next = Path.Combine(dir, "layout_next.json");
+        string res = Path.Combine(dir, "results.json");
+        if (!File.Exists(next) || !File.Exists(res))
+        {
+            autoStatus = "waiting " + (int)autoWait + " s for layout_next.json (is loop.py running?)";
+            return;
+        }
+        if (File.GetLastWriteTime(next) < File.GetLastWriteTime(res))
+        {
+            autoStatus = "layout_next.json is older than results.json (stale)";
+            return;
+        }
+        autoStatus = "found, loading...";
+        string auto = "layout_auto_" + roundTimes.Count + ".json";
+        File.Copy(next, Path.Combine(dir, auto), true);
+        File.Delete(next);
+        LayoutLoader.NextLayout = auto;
+        SceneManager.LoadScene(SceneManager.GetActiveScene().name);
+    }
+
     void OnGUI()
     {
         GUI.skin.label.fontSize = 20;
         GUI.skin.window.fontSize = 20;
-        GUILayout.BeginArea(new Rect(10, 10, 340, 260), "Evacuation", GUI.skin.window);
+        GUILayout.BeginArea(new Rect(10, 10, 340, 300), "Evacuation", GUI.skin.window);
         GUILayout.Label("Layout: " + LabelFor(LayoutLoader.NextLayout));
+        GUILayout.Label("Seed: " + currentSeed);
         GUILayout.Label("Time: " + elapsed.ToString("F1") + " s");
         GUILayout.Label("Evacuated: " + evacuated + " / " + spawned);
         GUILayout.Label("Remaining: " + (spawned - evacuated));
-        GUILayout.Label("[L] v2 [R] tight [B] bad");
+        GUILayout.Label("[O] auto [L] v2 [R] tight [B] bad");
         GUILayout.Label("[H] heat: " + (showHeat ? "ON" : "off") + " | WASD pan, QE orbit, drag tilt, wheel zoom");
         GUILayout.EndArea();
 
-        if (sessionTimes.Count > 0)
+        if (autoMode && roundTimes.Count > 0)
         {
-            GUILayout.BeginArea(new Rect(10, 280, 340, 60 + sessionTimes.Count * 30),
+            float t0 = roundTimes[0];
+            GUILayout.BeginArea(new Rect(10, 320, 460, 120 + roundTimes.Count * 30),
+                "Rounds", GUI.skin.window);
+            for (int i = 0; i < roundTimes.Count; i++)
+            {
+                string s = "Round " + i + ": " + roundTimes[i].ToString("F1") + " s";
+                if (i > 0 && t0 > 0f)
+                {
+                    float pct = (t0 - roundTimes[i]) / t0 * 100f;
+                    s += " (" + (pct >= 0f ? "-" : "+") + Mathf.Abs(pct).ToString("F0") + "% vs r0)";
+                }
+                GUILayout.Label(s);
+            }
+            float bestT = Mathf.Min(roundTimes.ToArray());
+            GUILayout.Label("Best: Round " + roundTimes.IndexOf(bestT) + ": " + bestT.ToString("F1") + " s");
+            GUILayout.Label("Auto: " + (finished ? autoStatus : "running..."));
+            GUILayout.EndArea();
+        }
+
+        if (!autoMode && sessionTimes.Count > 0)
+        {
+            GUILayout.BeginArea(new Rect(10, 320, 340, 60 + sessionTimes.Count * 30),
                 "Runs", GUI.skin.window);
             float best = float.MaxValue, worst = 0f;
             foreach (KeyValuePair<string, float> kv in sessionTimes)

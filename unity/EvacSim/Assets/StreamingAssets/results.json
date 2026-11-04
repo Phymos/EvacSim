@@ -1,15 +1,18 @@
 {
-  "evacuation_time_s": 22.7,
+  "evacuation_time_s": 23.2,
+  "timed_out": false,
+  "agents_evacuated": 120,
+  "agents_total": 120,
   "congestion_by_zone": {
-    "Room 1": 0.33,
-    "Room 2": 0.27,
-    "Room 3": 0.26,
-    "Room 4": 0.29,
-    "Corridor": 0.08
+    "Room 1": 0.49,
+    "Room 2": 0.55,
+    "Room 3": 0.47,
+    "Room 4": 0.49,
+    "Corridor": 0.12
   },
   "bottlenecks": [
-    {"rank": 1, "id": "door 4", "avg_wait_s": 3.7},
-    {"rank": 2, "id": "door 2", "avg_wait_s": 3.4},
-    {"rank": 3, "id": "door 1", "avg_wait_s": 3.3}
+    {"rank": 1, "id": "door 2", "avg_wait_s": 3.6},
+    {"rank": 2, "id": "door 1", "avg_wait_s": 3.2},
+    {"rank": 3, "id": "door 3", "avg_wait_s": 3.2}
   ]
 }

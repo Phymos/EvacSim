@@ -1,0 +1,130 @@
+[
+  {
+    "round": 0,
+    "layout": "layout_bad.json",
+    "time_s": 37.8,
+    "seed_times": {
+      "42": 36.1,
+      "43": 39.5
+    },
+    "wzc": 0.49,
+    "timed_out": false,
+    "cost": 0,
+    "changes": [],
+    "reasons": []
+  },
+  {
+    "round": 1,
+    "layout": "layout_round1.json",
+    "time_s": 23.0,
+    "seed_times": {
+      "42": 23.6,
+      "43": 22.3
+    },
+    "wzc": 0.56,
+    "timed_out": false,
+    "cost": 7,
+    "changes": [
+      {
+        "new_geometry": {
+          "width": 72
+        },
+        "reason": "Rank-1 bottleneck door 3 avg wait 4.3s feeds worst zone Room 3 0.48; doubling width to 1.8m raises flow capacity",
+        "target_id": "door 3",
+        "type": "widen_door"
+      },
+      {
+        "new_geometry": {
+          "width": 72
+        },
+        "reason": "Rank-2 bottleneck door 1 avg wait 4.1s feeds Room 1 0.46; doubling width to 1.8m balances with door 3",
+        "target_id": "door 1",
+        "type": "widen_door"
+      },
+      {
+        "new_geometry": {
+          "x": 1040,
+          "y": 360,
+          "w": 41,
+          "h": 81
+        },
+        "reason": "Mirror existing west exit to create east corridor exit for second egress, splitting east rooms and corridor flow to reduce travel distance",
+        "target_id": "new",
+        "type": "add_exit"
+      }
+    ],
+    "reasons": [
+      "Rank-1 bottleneck door 3 avg wait 4.3s feeds worst zone Room 3 0.48; doubling width to 1.8m raises flow capacity",
+      "Rank-2 bottleneck door 1 avg wait 4.1s feeds Room 1 0.46; doubling width to 1.8m balances with door 3",
+      "Mirror existing west exit to create east corridor exit for second egress, splitting east rooms and corridor flow to reduce travel distance"
+    ]
+  },
+  {
+    "round": 2,
+    "layout": "layout_round2.json",
+    "time_s": 22.9,
+    "seed_times": {
+      "42": 22.4,
+      "43": 23.5
+    },
+    "wzc": 0.57,
+    "timed_out": false,
+    "cost": 2,
+    "changes": [
+      {
+        "new_geometry": {
+          "width": 72
+        },
+        "reason": "Rank-2 bottleneck door 4 avg wait 2.7s feeds worst-zone Room 4 0.49 with only 36px width; widening to 72px doubles flow to match doors 1 and 3",
+        "target_id": "door 4",
+        "type": "widen_door"
+      },
+      {
+        "new_geometry": {
+          "width": 72
+        },
+        "reason": "Rank-3 bottleneck door 2 avg wait 2.5s feeds Room 2 0.47 with only 36px width; widening to 72px balances east rooms and removes remaining narrow room-to-corridor restriction",
+        "target_id": "door 2",
+        "type": "widen_door"
+      }
+    ],
+    "reasons": [
+      "Rank-2 bottleneck door 4 avg wait 2.7s feeds worst-zone Room 4 0.49 with only 36px width; widening to 72px doubles flow to match doors 1 and 3",
+      "Rank-3 bottleneck door 2 avg wait 2.5s feeds Room 2 0.47 with only 36px width; widening to 72px balances east rooms and removes remaining narrow room-to-corridor restriction"
+    ]
+  },
+  {
+    "round": 3,
+    "layout": "layout_round3.json",
+    "time_s": 22.7,
+    "seed_times": {
+      "42": 22.2,
+      "43": 23.2
+    },
+    "wzc": 0.57,
+    "timed_out": false,
+    "cost": 2,
+    "changes": [
+      {
+        "new_geometry": {
+          "width": 72
+        },
+        "reason": "Rank-1 bottleneck door 2 feeds worst-zone Room 2 0.52; widening inter-room door 0 from 36px to 72px creates high-capacity Room2-Room1 bypass so Room2 can use door 1, balancing load and cutting door 2 wait",
+        "target_id": "door 0",
+        "type": "widen_door"
+      },
+      {
+        "new_geometry": {
+          "width": 72
+        },
+        "reason": "Rank-2 bottleneck door 4 feeds Room 4 0.48; widening inter-room door 5 from 36px to 72px creates high-capacity Room4-Room3 bypass so Room4 can use door 3, balancing lower rooms and cutting door 4 wait",
+        "target_id": "door 5",
+        "type": "widen_door"
+      }
+    ],
+    "reasons": [
+      "Rank-1 bottleneck door 2 feeds worst-zone Room 2 0.52; widening inter-room door 0 from 36px to 72px creates high-capacity Room2-Room1 bypass so Room2 can use door 1, balancing load and cutting door 2 wait",
+      "Rank-2 bottleneck door 4 feeds Room 4 0.48; widening inter-room door 5 from 36px to 72px creates high-capacity Room4-Room3 bypass so Room4 can use door 3, balancing lower rooms and cutting door 4 wait"
+    ]
+  }
+]
